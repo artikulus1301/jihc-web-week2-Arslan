@@ -3,8 +3,15 @@ const fs = require('fs');
 const path = require('path');
 
 const PORT = 3000;
-const DATA_FILE = path.join(__dirname, 'data.json');
 const FRONTEND_FOLDER = path.join(__dirname, '..', 'frontend');
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  user: 'postgres',
+  host: 'localhost',
+  database: 'devproject_db',
+  port: 5433
+})
 
 function getUsers() {
   return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -53,9 +60,15 @@ function serveFrontend(request, response) {
   });
 }
 
-const server = http.createServer((request, response) => {
+const server = http.createServer( async (request, response) => {
   if (request.method === 'GET' && request.url === '/users') {
-    sendJson(response, 200, getUsers());
+    try {
+      const result = await pool.query('SELECT id, username FROM users ORDER BY id ASC');
+      sendJson(response, 200, result.rows);
+    } catch (error) {
+      console.error('Ошибка БД', error);
+      sendJson(response, 500, { message: 'Ошибки при получении данных'});
+    }
     return;
   }
 
@@ -66,42 +79,51 @@ const server = http.createServer((request, response) => {
       body += chunk;
     });
 
-    request.on('end', () => {
+    request.on('end',async () => {
       try {
         const userData = JSON.parse(body);
-        const users = getUsers();
 
         if (request.url === '/register') {
-          const userExists = users.some(user => user.username === userData.username);
+          const checkUser = await pool.query(
+            'SELECT id FROM users WHERE username = $1',
+            [userData.username]
+          )
 
-          if (userExists) {
+          if (checkUser.rows.length > 0) {
             sendJson(response, 409, { message: 'Пользователь уже существует' });
             return;
           }
 
-          const newUser = {
-            id: Date.now(),
-            username: userData.username,
-            password: userData.password
-          };
+          const insertResult = await pool.query(
+            'INSERT INTO users (username, password) VALUES ($1, $2) RETURNING id, username',
+            [userData.username, userData.password]
+          )
 
-          users.push(newUser);
-          saveUsers(users);
-          sendJson(response, 201, { message: 'Регистрация прошла успешно', user: { id: newUser.id, username: newUser.username } });
-          return;
+          const newUser = insertResult.rows[0];
+          sendJson(response, 201, {
+            message: 'Регистрация успешна',
+            user: newUser
+          });
+
+          return};
+          
+
+  if (request.url === '/login') {
+          const result = await pool.query(
+            'SELECT id, username FROM users WHERE username = $1 AND password = $2',
+            [userData.username, userData.password]
+          );
+          if (result.rows.length === 0) {
+            sendJson(response, 401, { message: 'Неверное имя пользователя или пароль' });
+            return;
+          }
+          sendJson(response, 200, {
+            message: 'Вход выполнен успешно',
+            user: result.rows[0]
+          });
         }
-
-        const foundUser = users.find(user =>
-          user.username === userData.username && user.password === userData.password
-        );
-
-        if (!foundUser) {
-          sendJson(response, 401, { message: 'Неверное имя пользователя или пароль' });
-          return;
-        }
-
-        sendJson(response, 200, { message: 'Вход выполнен успешно', user: { id: foundUser.id, username: foundUser.username } });
       } catch (error) {
+        console.error(error);
         sendJson(response, 400, { message: 'Неверный формат данных' });
       }
     });
